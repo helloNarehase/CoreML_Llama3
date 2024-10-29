@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 from dataclasses import dataclass
 
-from llamaCache import KVCache
+from .llamaCache import KVCache
 
 @dataclass
 class ModelArgs:
@@ -22,6 +22,7 @@ class ModelArgs:
 
     max_batch_size: int = 1
     max_seq_len: int = 2048
+    use_scaled_rope:bool = True
 
 def precompute_freqs_cis_real(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
@@ -327,7 +328,7 @@ class Transformer(nn.Module):
         return logits.float()
     
 
-class Llama_coreML(nn.Module):
+class Llama_CoreML(nn.Module):
     def __init__(self, transformer:Transformer) -> None:
         super().__init__()
         self.transformer = transformer
