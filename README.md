@@ -40,6 +40,5 @@ python coreml_quant.py --input_dir <path_to_input_model.mlpackage> --output_dir 
 
 
 ## This project is designed to work with the following models:
-- Llama3.1 7B
 - Llama3.2 1B
 - Llama3.2 3B
