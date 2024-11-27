@@ -2,3 +2,4 @@ torch == 2.4
 coremltools == 8.0
 numpy == 1.24
 tiktoken
+transformers
