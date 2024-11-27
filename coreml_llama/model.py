@@ -93,6 +93,27 @@ class RoPE(nn.Module):
         x_out = apply_rotary_emb_with_real(x, magnitudes, angles)
         return x_out
 
+class TrainedRoPE(RoPE):
+    def __init__(
+        self,
+        dim: int,
+        end: int,
+        theta: float = 500000.0
+    ):
+        super().__init__(dim, end, theta)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """쿼리와 키 텐서에 rotary embedding을 적용"""
+        # print(x.shape, start_pos)
+        _bsz, seqlen, _, _ = x.shape
+        
+        # 필요한 주파수 값을 슬라이스로 추출
+        magnitudes = self.magnitudes[: seqlen]
+        angles = self.angles[: seqlen]
+        
+        x_out = apply_rotary_emb_with_real(x, magnitudes, angles)
+        return x_out
+
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -218,6 +239,54 @@ class Attention(nn.Module):
         return self.wo(output)
 
 
+class Trained_Attention(Attention):
+    def __init__(self, args: ModelArgs):
+        super().__init__(args)
+
+        self.rope = TrainedRoPE(
+            args.dim // args.n_heads,
+            args.max_seq_len * 2,
+            args.rope_theta,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ):
+        bsz, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        xq = self.rope(xq)
+        xk = self.rope(xk)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        keys = repeat_kv(
+            keys, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(
+            values, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+
+        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        values = values.transpose(
+            1, 2
+        )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+
+        output = torch.nn.functional.scaled_dot_product_attention(
+            xq,
+            keys,
+            values,
+            attn_mask=mask.to(xq),
+        )
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        return self.wo(output)
+
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -277,6 +346,22 @@ class TransformerBlock(nn.Module):
         
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
+    
+
+class Trained_TransformerBlock(TransformerBlock):
+    def __init__(self, layer_id: int, args: ModelArgs):
+        super().__init__(layer_id, args)
+        self.attention = Trained_Attention(args)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ):
+        h = torch.add(x, self.attention(self.attention_norm(x), mask))
+        h = torch.clamp(h, min=-1e9, max=1e9)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
 
 class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):
@@ -327,6 +412,22 @@ class Transformer(nn.Module):
         logits = self.output(h)
         return logits.float()
     
+
+class Trained_Transformer(Transformer):
+    def __init__(self, params: ModelArgs):
+        super().__init__(params)
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(params.n_layers):
+            self.layers.append(Trained_TransformerBlock(layer_id, params))
+
+    def forward(self, tokens: torch.Tensor, mask: torch.Tensor):
+        h = self.tok_embeddings(tokens)
+        for idx in range(self.params.n_layers):
+            layer = self.layers[idx]
+            h = layer(h, mask)
+        h = self.norm(h)
+        logits = self.output(h)
+        return logits.float()
 
 class Llama_CoreML(nn.Module):
     def __init__(self, transformer:Transformer) -> None:
